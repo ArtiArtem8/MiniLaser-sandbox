@@ -1,13 +1,14 @@
 use std::collections::HashMap;
 
 use log::{error, info};
-use macroquad::color::{Color, SKYBLUE, WHITE};
+use macroquad::color::{BLACK, BLUE, Color, GREEN, RED, SKYBLUE, WHITE};
 use macroquad::input::{is_mouse_button_pressed,
                        is_mouse_button_released,
                        mouse_position,
                        MouseButton};
 use macroquad::math::Vec2;
-use macroquad::shapes::draw_line;
+use macroquad::prelude::{draw_texture, ImageFormat};
+use macroquad::shapes::{draw_circle, draw_line, draw_poly_lines};
 use macroquad::texture::{draw_texture_ex,
                          DrawTextureParams,
                          load_texture,
@@ -55,9 +56,160 @@ pub struct NodeNetwork {
     key: usize,
 }
 
+pub struct Ray {
+    origin: Vec2,
+    direction: Vec2,
+}
+
+pub struct Laser {
+    position: Vec2,
+    direction: Vec2,
+    ray: Ray,
+    color: Color,
+    thickness: f32,
+    texture: Texture2D,
+}
+
+impl Laser {
+    pub fn new(position: Vec2, direction: Vec2) -> Self {
+        Self {
+            position,
+            direction,
+            ray: Ray { origin: position, direction },
+            color: RED,
+            thickness: 5.0,
+            texture: Texture2D::from_file_with_format(
+                include_bytes!("../assets/laser.png"),
+                Some(ImageFormat::Png),
+            ),
+        }
+    }
+
+
+    fn draw_texture(&self) {
+        let center = Vec2::new(self.position.x, self.position.y);
+        let size = 80.0; // in pixels
+        let top_left = center - Vec2::new(size, size) / 2.0;
+        draw_texture_ex(
+            &self.texture,
+            top_left.x,
+            top_left.y,
+            WHITE,
+            DrawTextureParams {
+                dest_size: Some(Vec2::new(size, size)),
+                rotation: self.ray.direction.y.atan2(self.ray.direction.x),
+                ..Default::default()
+            },
+        );
+    }
+    pub fn draw(&self) {
+        let end = self.ray.origin + self.ray.direction * 10_000.0;
+
+        draw_line(self.position.x, self.position.y, end.x, end.y, self.thickness, self.color);
+        self.draw_texture();
+    }
+
+    pub fn collide_many(&self, other: &Vec<(Vec2, Vec2)>) {
+        for segment in other.iter() {
+            self.collide(*segment);
+        }
+    }
+    pub fn collide(&self, other: (Vec2, Vec2)) {
+        let collision = self.ray.collides_with(other);
+        if let Some(np) = collision {
+            let pos = np.0;
+            let normal = np.1;
+            // info!("Collision at {:?}", pos);
+            draw_circle(pos.x, pos.y, 10.0, BLUE);
+        }
+    }
+    pub fn look_at(&mut self, position: Vec2) {
+        self.direction = position - self.position;
+        self.ray.direction = self.direction.normalize_or_zero();
+    }
+}
+
+impl Ray {
+    pub fn collides_with(&self, other: (Vec2, Vec2)) -> Option<(Vec2, Vec2)> {
+        let (start, end) = other;
+        // let ray_to_start = start - self.origin;
+        // let ray_to_end = end - self.origin;
+        let ray_dir = self.direction.normalize_or_zero();
+        let ray_dir_perp = ray_dir.perp();
+
+        let v1 = self.origin - start;
+        let v2 = end - start;
+        let v3 = ray_dir_perp;
+        let t1 = v2.perp_dot(v1) / v2.dot(v3);
+        let t2 = v1.dot(v3) / v2.dot(v3);
+        return if t1 >= 0.0 && t2 >= 0.0 && t2 <= 1.0 {
+            let collision = self.origin + ray_dir * t1;
+            let mut normal_to_collision = (collision - start).normalize_or_zero().perp();
+            if normal_to_collision.dot(ray_dir) > 0.0 {
+                normal_to_collision = -normal_to_collision;
+            }
+            draw_line(collision.x, collision.y, (collision.x + normal_to_collision.x * 100.0), (collision.y + normal_to_collision.y * 100.0), 5.0, GREEN);
+            Some((collision, normal_to_collision))
+        } else {
+            None
+        };
+        /*
+        let seg1 = start - self.origin;
+        let seg2 = end - self.origin;
+        let ray_dir = self.direction.normalize_or_zero();
+        let seg_cross = seg1.perp_dot(seg2);
+        let dir_cross = ray_dir.perp_dot(seg2);
+
+        // Check if the ray and segment are parallel
+        if seg_cross.abs() < 1e-6 {
+            return None;
+        }
+
+        let t = dir_cross / seg_cross;
+        let u = seg1.perp_dot(ray_dir) / seg_cross;
+
+        info!("t: {}, u: {}", t, u);
+        // Check if the intersection point is within the segment and not behind the ray
+        if t >= 0.0 && u >= 0.0 && u <= 1.0 {
+            let intersection_point = start * t;
+            return Some(Vec2::new(self.origin.x + intersection_point.x, self.origin.y + intersection_point.y));
+        } else {
+            return None;
+        }
+
+
+        let segment = end - start;
+        let segment_perp = segment.perp();
+        info!("determinant: {}", ray_dir.perp_dot(ray_to_end));
+        let numerator = (start - self.origin).dot(segment_perp);
+        let denominator = ray_dir.dot(segment_perp);
+
+        if denominator.abs() <= f32::EPSILON {
+            return None;
+        }
+
+        let t1 = numerator / denominator;
+        if t1 < 0.0 || t1 > 1.0 {
+            // info!("t1: {}", t1);
+            return None;
+        }
+        let t2 = ray_to_start.dot(ray_dir_perp) / denominator;
+        if t2 < 0.0/* || t1 + t2 > 1.0*/ {
+            info!("t2: {}", t2);
+            return None;
+        }
+        // let pos = self.origin - ray_dir + ray_dir * t1;
+        let collision = self.origin + ray_dir * t1;
+        return Some(collision);
+        */
+    }
+}
+
 impl NodeNetwork {
     pub async fn new() -> Self {
-        let texture = load_texture("assets/node2.png").await.unwrap();
+        let texture = Texture2D::from_file_with_format(
+            include_bytes!("../assets/node2.png"), Some(ImageFormat::Png));
+        // let texture = load_texture("E:\\CLion\\ray_cast\\assets\\node2.png").await.unwrap();
         Self {
             nodes: HashMap::new(),
             connections: Vec::new(),
@@ -106,18 +258,13 @@ impl NodeNetwork {
             edge.is_hovered = Self::point_line_collision(mouse_pos, pos1, pos2, edge.thickness);
         }
     }
-    /*
-    if self.contains(vec2tuple(mouse_position())) {
-        is_hovered = true;
-        if is_mouse_button_pressed(MouseButton::Left) {
-            is_dragged = true;
+    pub fn get_all_connections(&self) -> Vec<(Vec2, Vec2)> {
+        let mut connections = Vec::with_capacity(self.connections.len());
+        for edge in &self.connections {
+            connections.push((self.nodes[&edge.a].position, self.nodes[&edge.b].position));
         }
-    } else { is_hovered = false; }
-
-    if is_mouse_button_released(MouseButton::Left) && self.is_dragged {
-        is_dragged = false;
+        connections
     }
-    */
     pub fn draw(&self) {
         for edge in &self.connections {
             edge.draw(self.nodes[&edge.a].position, self.nodes[&edge.b].position);
@@ -201,13 +348,13 @@ impl NodeNetwork {
         }
         self.nodes.remove(&index);
     }
-    fn add_node(&mut self, position: Vec2) -> usize {
+    pub fn add_node(&mut self, position: Vec2) -> usize {
         info!("Added node at {:} keys: {}", position, self.key);
         self.nodes.insert(self.key, Node::new_default_radius(position));
         self.key += 1;
         return self.key - 1;
     }
-    fn add_connection(&mut self, prev_conn: usize, cur_conn: usize) {
+    pub fn add_connection(&mut self, prev_conn: usize, cur_conn: usize) {
         if self.connections.iter().any(|edge|
             (edge.a == prev_conn && edge.b == cur_conn) ||
                 (edge.a == cur_conn && edge.b == prev_conn)) {
@@ -280,6 +427,7 @@ impl PartialEq for Node {
     }
 }
 
+
 #[inline(always)]
 #[must_use]
 fn lerpf(from: f32, to: f32, t: f32) -> f32 {
@@ -288,6 +436,7 @@ fn lerpf(from: f32, to: f32, t: f32) -> f32 {
 
 #[inline(always)]
 #[must_use]
+#[allow(dead_code)]
 fn lerp_color(from: Color, to: Color, t: f32) -> Color {
     Color {
         r: lerpf(from.r, to.r, t),
