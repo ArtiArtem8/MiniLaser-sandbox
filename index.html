@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <title>Canvas</title>
+    <style>
+        html,
+        body,
+        canvas {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            position: absolute;
+            background: black;
+            z-index: 0;
+        }
+    </style>
+</head>
+
+<body>
+<canvas id="glcanvas" tabindex='1'></canvas>
+<script src="https://not-fl3.github.io/miniquad-samples/mq_js_bundle.js"></script>
+<script>load("target/wasm32-unknown-unknown/release/ray_cast.wasm");</script>
+<script>document.addEventListener('contextmenu', event => event.preventDefault());</script>
+</body>
+
+</html>
