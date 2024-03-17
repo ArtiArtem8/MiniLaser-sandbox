@@ -7,18 +7,21 @@ use macroquad::prelude::*;
 use ray_cast::{Laser, NodeNetwork};
 
 fn window_conf() -> Conf {
-    Conf {
+    let mut conf = Conf {
         window_title: "RayCast".to_owned(),
         window_width: 1920 / 2,
         window_height: 1080 / 2,
+
         ..Default::default()
-    }
+    };
+    conf.platform.swap_interval = Some(0);
+    conf
 }
 #[macroquad::main(window_conf)]
 async fn main() {
     env_logger::init();
     info!("Program started");
-
+    println!("hello world");
     let mut network = NodeNetwork::new().await;
     let mut laser = Laser::new(vec2(screen_width()/2.0, screen_height()/2.0), vec2(1.0, 0.0));
     
@@ -55,11 +58,11 @@ async fn main() {
         network.draw();
         laser.draw(&network.get_all_connections());
         draw_text(format!("Frame time: {time_delta}").as_str(), 20.0, 20.0, 30.0, DARKGRAY);
+        draw_text("Tab for options", 20.0, 40.0, 30.0, DARKGRAY);
 
         if show_ui {
             laser.ui();
         }
-        
         next_frame().await
     }
 }
