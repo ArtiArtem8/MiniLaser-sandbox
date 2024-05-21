@@ -1,7 +1,9 @@
 use std::collections::HashMap;
+use std::ptr::addr_of_mut;
 use std::time::Instant;
 
-use log::{error, info};
+// #[cfg(not(target_family = "wasm"))]
+use log::{debug, error};
 use macroquad::color::{BLACK, Color, hsl_to_rgb, SKYBLUE, WHITE};
 use macroquad::hash;
 use macroquad::input::{is_key_down, is_mouse_button_pressed, is_mouse_button_released,
@@ -14,6 +16,16 @@ use macroquad::texture::{draw_texture_ex,
                          Texture2D};
 use macroquad::ui::{root_ui, widgets};
 use macroquad::window::{screen_height, screen_width};
+
+// #[cfg(target_family = "wasm")]
+// use macroquad::logging::info;
+//
+// #[cfg(target_family = "wasm")]
+// #[cfg(debug_assertions)]
+// use macroquad::logging::debug;
+//
+// #[cfg(target_family = "wasm")]
+// use macroquad::logging::error;
 
 static mut ESTIMATE_IN_SECONDS: bool = false;
 static mut ESTIMATE_MILLIS: f32 = 1.0;
@@ -30,8 +42,9 @@ pub struct Node {
     dragged_start_pos: Vec2,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum EdgeState {
+    #[default]
     Reflective,
     Absorptive,
 }
@@ -52,7 +65,7 @@ pub struct Segment(Vec2, Vec2, EdgeState);
 
 impl Edge {
     pub fn new(a: usize, b: usize) -> Self {
-        Self { a, b, color: WHITE, thickness: 5.0, is_hovered: false, state: EdgeState::Reflective }
+        Self { a, b, color: WHITE, thickness: 5.0, is_hovered: false, state: EdgeState::default() }
     }
 
     fn draw(&self, start: Vec2, end: Vec2) {
@@ -108,9 +121,7 @@ impl Laser {
 
     pub fn ui(&mut self) {
         let mut rotation = self.ray.direction.y.atan2(self.ray.direction.x).to_degrees();
-        if rotation < 0.0 {
-            rotation += 360.0;
-        }
+        if rotation < 0.0 { rotation += 360.0; }
         widgets::Window::new(hash!(), Vec2::new(0., 0.), Vec2::new(400., 100.))
             .label("Laser")
             .ui(&mut *root_ui(), |ui| {
@@ -118,19 +129,24 @@ impl Laser {
                 ui.slider(hash!(), "pos y", 0.0f32..screen_height(), &mut self.position.y);
                 ui.slider(hash!(), "rotation", 0.0f32..360.0f32, &mut rotation);
                 ui.slider(hash!(), "thickness", 0.01f32..10.0f32, &mut self.thickness);
-                unsafe {
-                    ui.checkbox(hash!(), "estimate in milliseconds",
-                                &mut ESTIMATE_IN_SECONDS);
-                }
-                unsafe {
-                    ui.slider(hash!(), "milliseconds", 0.00f32..100.0f32,
-                              &mut ESTIMATE_MILLIS);
+
+                // not allow in web
+                #[cfg(not(target_family = "wasm"))]
+                {
+                    unsafe {
+                        ui.checkbox(hash!(), "estimate in milliseconds",
+                                    &mut *addr_of_mut!(ESTIMATE_IN_SECONDS));
+                    }
+                    unsafe {
+                        ui.slider(hash!(), "milliseconds", 0.00f32..100.0f32,
+                                  &mut *addr_of_mut!(ESTIMATE_MILLIS));
+                    }
                 }
                 unsafe {
                     ui.slider(hash!(), "max rays", 1.0f32..100_000.0f32,
-                              &mut MAX_RAYS);
+                              &mut *addr_of_mut!(MAX_RAYS));
                 }
-                unsafe { MAX_RAYS = MAX_RAYS as u32 as f32; }
+                unsafe { MAX_RAYS = MAX_RAYS.round(); }
             });
         self.direction = Vec2::from_angle(rotation.to_radians());
         self.ray.origin = self.position;
@@ -159,15 +175,14 @@ impl Laser {
         let (points, _) = unsafe { self.collide_many(other) };
         let mut prev_pos = self.position;
         let mut t = 0.0;
-        unsafe {
-            for pos in points.iter() {
-                let color = hsl_to_rgb(t / MAX_RAYS, 1.0, 0.5);
-                // color.a = 1.0 - t/ 1000.0;
-                draw_line(prev_pos.x, prev_pos.y, pos.x, pos.y, self.thickness,
-                          color);
-                prev_pos = *pos;
-                t += 1.0;
-            }
+        let max_rays = unsafe { MAX_RAYS };
+        for pos in points.iter() {
+            let color = hsl_to_rgb(t / max_rays, 1.0, 0.5);
+            // color.a = 1.0 - t/ 1000.0;
+            draw_line(prev_pos.x, prev_pos.y, pos.x, pos.y, self.thickness,
+                      color);
+            prev_pos = *pos;
+            t += 1.0;
         }
         // if points.len() < 1_000 {
         //     // let end = prev_pos + direction * 10_000.0;
@@ -176,89 +191,74 @@ impl Laser {
         self.draw_texture();
     }
 
-    pub unsafe fn collide_many(&self, other: &Vec<Segment>) -> (Vec<Vec2>, Vec2) {
+    pub unsafe fn collide_many(&self, other: &[Segment]) -> (Vec<Vec2>, Vec2) {
         let mut collision_points: Vec<Vec2> = Vec::new();
         let mut ray = self.ray;
         let mut ray_origin_segment: Option<&Segment> = None;
-        // make a timer to limit the number of iterations by milliseconds
+        const MAX_DISTANCE: f32 = 20_000.0;
+
+
         if ESTIMATE_IN_SECONDS {
             let start = Instant::now();
-            while start.elapsed().as_nanos() < (ESTIMATE_MILLIS * 1_000_000.0) as u128 {
-                let mut closest_point: Segment = Segment(ray.origin + ray.direction * 20_000.0,
-                                                         ray.direction,
-                                                         EdgeState::Reflective);
-                let mut ray_origin_new: Option<&Segment> = None;
-                for segment in other.iter() {
-                    if ray_origin_segment.is_some() {
-                        // info!("ray_origin_segment: {:?}", ray_origin_segment);
-                        if segment == ray_origin_segment.unwrap() { continue; }
-                    }
-                    match Self::collide(ray, (segment.0, segment.1)) {
-                        Some((col_position, col_reflection)) =>
-                            if closest_point.0.distance(ray.origin) >
-                                col_position.distance(ray.origin)
-                            {
-                                ray_origin_new = Some(segment);
-                                closest_point = Segment(col_position, col_reflection, segment.2);
-                            },
-                        None => (),
-                    };
-                }
+            let max_time = ESTIMATE_MILLIS as f64 / 1_000f64;
+            while start.elapsed().as_secs_f64() < max_time {
+                let (closest_point, ray_origin_new) = Self::find_closest_segment(ray, other, ray_origin_segment);
                 ray_origin_segment = ray_origin_new;
                 collision_points.push(closest_point.0);
-
-                match closest_point.2 {
-                    EdgeState::Absorptive => break,
-                    _ => (),
-                }
-                if closest_point.0.distance(ray.origin) > 10_000.0 {
-                    break;
-                }
+                if matches!(closest_point.2, EdgeState::Absorptive) { break; }
+                if closest_point.0.distance(ray.origin) > MAX_DISTANCE { break; }
                 ray = Ray {
-                    origin: closest_point.0 + closest_point.1 * 0.0,
+                    origin: closest_point.0,
                     direction: closest_point.1,
                 };
             }
         } else {
             for _ in 0..MAX_RAYS as u32 {
-                let mut closest_point: Segment = Segment(ray.origin + ray.direction * 20_000.0,
-                                                         ray.direction,
-                                                         EdgeState::Reflective);
-                let mut ray_origin_new: Option<&Segment> = None;
-                for segment in other.iter() {
-                    if ray_origin_segment.is_some() {
-                        // info!("ray_origin_segment: {:?}", ray_origin_segment);
-                        if segment == ray_origin_segment.unwrap() { continue; }
-                    }
-                    match Self::collide(ray, (segment.0, segment.1)) {
-                        Some((col_position, col_reflection)) =>
-                            if closest_point.0.distance(ray.origin) >
-                                col_position.distance(ray.origin)
-                            {
-                                ray_origin_new = Some(segment);
-                                closest_point = Segment(col_position, col_reflection, segment.2);
-                            },
-                        None => (),
-                    };
-                }
+                let (closest_point, ray_origin_new) =
+                    Self::find_closest_segment(ray, other, ray_origin_segment);
                 ray_origin_segment = ray_origin_new;
                 collision_points.push(closest_point.0);
-
-                match closest_point.2 {
-                    EdgeState::Absorptive => break,
-                    _ => (),
-                }
-                if closest_point.0.distance(ray.origin) > 10_000.0 {
-                    break;
-                }
+                if matches!(closest_point.2, EdgeState::Absorptive) { break; }
+                if closest_point.0.distance(ray.origin) > 10_000.0 { break; }
                 ray = Ray {
-                    origin: closest_point.0 + closest_point.1 * 0.0,
+                    origin: closest_point.0,
                     direction: closest_point.1,
                 };
             }
         }
-        return (collision_points, self.ray.direction);
+
+        (collision_points, self.ray.direction)
     }
+    fn find_closest_segment<'a>(
+        ray: Ray,
+        other: &'a [Segment],
+        ray_origin_segment: Option<&'a Segment>,
+    ) -> (Segment, Option<&'a Segment>) {
+        let mut closest_point: Segment = Segment(
+            ray.origin + ray.direction * 20_000.0,
+            ray.direction,
+            EdgeState::Reflective,
+        );
+        let mut ray_origin_new: Option<&Segment> = None;
+
+        for segment in other.iter() {
+            if let Some(origin_segment) = ray_origin_segment {
+                if segment == origin_segment { continue; }
+            }
+            match Self::collide(ray, (segment.0, segment.1)) {
+                Some((col_position, col_reflection)) => {
+                    if closest_point.0.distance(ray.origin) > col_position.distance(ray.origin) {
+                        ray_origin_new = Some(segment);
+                        closest_point = Segment(col_position, col_reflection, segment.2);
+                    }
+                }
+                None => {}
+            }
+        }
+
+        (closest_point, ray_origin_new)
+    }
+
     pub fn collide(ray: Ray, other: (Vec2, Vec2)) -> Option<(Vec2, Vec2)> {
         let collision = ray.collides_with(other);
         if let Some((pos, normal)) = collision {
@@ -281,8 +281,6 @@ impl Laser {
 impl Ray {
     pub fn collides_with(&self, other: (Vec2, Vec2)) -> Option<(Vec2, Vec2)> {
         let (start, end) = other;
-        // let ray_to_start = start - self.origin;
-        // let ray_to_end = end - self.origin;
         let ray_dir = self.direction.normalize_or_zero();
         let ray_dir_perp = ray_dir.perp();
 
@@ -298,7 +296,7 @@ impl Ray {
                 normal_to_collision = -normal_to_collision;
             }
             // draw_line(collision.x, collision.y, (collision.x + normal_to_collision.x * 100.0),
-            // (collision.y + normal_to_collision.y * 100.0), 5.0, GREEN);
+            // (collision.y + normal_to_collision.y * 100.0), 5.0, WHITE);
             Some((collision, normal_to_collision))
         } else {
             None
@@ -354,7 +352,7 @@ impl NodeNetwork {
             let pos2 = match self.nodes.get(&edge.b) {
                 Some(x) => x.position,
                 None => {
-                    error!("Edge b in ({edge:?}) does not exist");
+                    error!("Edge b in ({:?}) does not exist", edge);
                     error!("{:?}", self.nodes);
                     Vec2::new(0.0, 0.0)
                 }
@@ -427,7 +425,7 @@ impl NodeNetwork {
                 }
                 let node_index = self.add_node(new_mp);
                 if let Some(selected_index) = self.selected_node {
-                    info!("Adding connection from {selected_index} to {node_index}");
+                    debug!("Adding connection from {} to {}", selected_index, node_index);
                     self.add_connection(selected_index, node_index);
                     self.selected_node = None;
                 }
@@ -462,12 +460,8 @@ impl NodeNetwork {
         let mut new_mp = *new_mp;
         if is_key_down(KeyCode::LeftControl) {
             let diff = mp - node.position;
-            if diff.x.abs() > diff.y.abs() {
-                new_mp.x = mp.x
-            } else { new_mp.y = mp.y }
-        } else {
-            new_mp = mp;
-        }
+            if diff.x.abs() > diff.y.abs() { new_mp.x = mp.x } else { new_mp.y = mp.y }
+        } else { new_mp = mp; }
         new_mp
     }
     fn point_line_collision(point: Vec2, line_start: Vec2, line_end: Vec2, thickness: f32) -> bool {
@@ -486,7 +480,7 @@ impl NodeNetwork {
         self.nodes.remove(&index);
     }
     pub fn add_node(&mut self, position: Vec2) -> usize {
-        info!("Added node at {:} keys: {}", position, self.key);
+        debug!("Added node at {:} keys: {}", position, self.key);
         self.nodes.insert(self.key, Node::new_default_radius(position));
         self.key += 1;
         return self.key - 1;
@@ -495,11 +489,11 @@ impl NodeNetwork {
         if self.connections.iter().any(|edge|
             (edge.a == prev_conn && edge.b == cur_conn) ||
                 (edge.a == cur_conn && edge.b == prev_conn)) {
-            info!("Connection already exists");
+            debug!("Connection already exists");
             return;
         }
         self.connections.push(Edge::new(prev_conn, cur_conn));
-        info!("Connection created between nodes {} and {}",
+        debug!("Connection created between nodes {} and {}",
                         prev_conn, cur_conn);
     }
 }
@@ -521,8 +515,6 @@ impl Node {
         (position - self.position).length_squared() <= self.radius.powi(2)
     }
     fn draw(&self, texture2d: &Texture2D) {
-        // load_texture("assets/node.png").await.unwrap();
-        // draw_circle(self.position.x, self.position.y, self.radius, self.default_color);
         draw_texture_ex(texture2d,
                         self.position.x - self.radius, self.position.y - self.radius,
                         self.color,
@@ -536,12 +528,9 @@ impl Node {
         self.handle_hover(delta);
     }
     fn handle_hover(&mut self, delta: f32) {
-        let target_radius: f32;
-        if self.is_hovered {
-            target_radius = self.default_radius * 2.0;
-        } else {
-            target_radius = self.default_radius;
-        };
+        let target_radius: f32 = if
+        self.is_hovered { self.default_radius * 2.0 } else { self.default_radius };
+
         self.radius = lerpf(self.radius, target_radius, delta / 0.10);
     }
     fn handle_drag(&mut self, delta: f32) {
