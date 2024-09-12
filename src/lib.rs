@@ -1,17 +1,15 @@
 use std::collections::{HashMap, VecDeque};
 use std::ptr::addr_of_mut;
-use std::time::Instant;
 
 // #[cfg(not(target_family = "wasm"))]
 use log::{debug, error};
-use macroquad::color::{BLACK, BLUE, Color, DARKGRAY, hsl_to_rgb, RED, SKYBLUE, WHITE};
-use macroquad::experimental::scene::camera_pos;
+use macroquad::color::{BLACK, Color, DARKGRAY, SKYBLUE, WHITE};
 use macroquad::hash;
 use macroquad::input::{is_key_down, is_mouse_button_pressed, is_mouse_button_released,
                        KeyCode, mouse_position as other_mouse_position, MouseButton};
-use macroquad::math::{DVec2, Vec2, vec2};
-use macroquad::prelude::{draw_text, glam, ImageFormat};
-use macroquad::shapes::{draw_circle, draw_line};
+use macroquad::math::{Vec2, vec2};
+use macroquad::prelude::{draw_text, ImageFormat};
+use macroquad::shapes::{draw_line};
 use macroquad::texture::{draw_texture_ex,
                          DrawTextureParams,
                          Texture2D};
@@ -30,9 +28,9 @@ mod labyrinth;
 // #[cfg(target_family = "wasm")]
 // use macroquad::logging::error;
 
-static mut ESTIMATE_IN_SECONDS: bool = false;
+// static mut ESTIMATE_IN_SECONDS: bool = false;
 static mut OBJECT_REFLECTIVITY: f32 = 1.0;
-static mut ESTIMATE_MILLIS: f32 = 1.0;
+// static mut ESTIMATE_MILLIS: f32 = 1.0;
 static mut MAX_RAYS: f32 = 1000.0;
 static mut CAMERA_TARGET: Vec2 = vec2(0.0, 0.0);
 static mut ZOOM: f32 = 1.0;
@@ -53,11 +51,11 @@ unsafe fn screen_to_world(mouse_pos: (f32, f32)) -> (f32, f32) {
 }
 
 unsafe fn world_to_screen((x, y): (f32, f32)) -> (f32, f32) {
-    
+
     let screen_center = vec2(screen_width() / 2.0, screen_height() / 2.0);
     let (x, y) = (x - CAMERA_TARGET.x, y - CAMERA_TARGET.y);
     (x * ZOOM + screen_center.x, y * ZOOM + screen_center.y)
-    
+
 }
 
 #[derive(Clone, Default, Debug)]
@@ -121,8 +119,8 @@ impl Edge {
         })
     }
 
-    fn draw(&self, start: Vec2, end: Vec2) {
-        draw_line(start.x, start.y, end.x, end.y, self.thickness, self.color);
+    fn draw(&self, start: Vec2, end: Vec2,  edge_thickness: f32) {
+        draw_line(start.x, start.y, end.x, end.y, edge_thickness, self.color);
     }
     pub(crate) fn update(&mut self, delta: f32) {
         let target_color = if self.is_hovered { SKYBLUE } else {
@@ -146,7 +144,7 @@ pub struct NodeNetwork {
 }
 
 
-   
+
 
 
 #[derive(Clone, Copy, Debug)]
@@ -160,7 +158,7 @@ pub struct Laser {
     position: Vec2,
     direction: Vec2,
     ray: Ray,
-    thickness: f32,
+    pub thickness: f32,
     texture: Texture2D,
 }
 
@@ -190,20 +188,20 @@ impl Laser {
                 ui.slider(hash!(), "pos y", 0.0f32..screen_height(), &mut self.position.y);
                 ui.slider(hash!(), "rotation", 0.0f32..360.0f32, &mut rotation);
                 ui.slider(hash!(), "thickness", 0.01f32..10.0f32, &mut self.thickness);
-                unsafe { ui.slider(hash!(), "OBJECT_REFLECTIVITY ", 0.00f32..1.0f32, &mut *addr_of_mut!(OBJECT_REFLECTIVITY)); }
+                // unsafe { ui.slider(hash!(), "OBJECT_REFLECTIVITY ", 0.00f32..1.0f32, &mut *addr_of_mut!(OBJECT_REFLECTIVITY)); }
 
                 // not allow in web
-                #[cfg(not(target_family = "wasm"))]
-                {
-                    unsafe {
-                        ui.checkbox(hash!(), "estimate in milliseconds",
-                                    &mut *addr_of_mut!(ESTIMATE_IN_SECONDS));
-                    }
-                    unsafe {
-                        ui.slider(hash!(), "milliseconds", 0.00f32..100.0f32,
-                                  &mut *addr_of_mut!(ESTIMATE_MILLIS));
-                    }
-                }
+                // #[cfg(not(target_family = "wasm"))]
+                // {
+                //     unsafe {
+                //         ui.checkbox(hash!(), "estimate in milliseconds",
+                //                     &mut *addr_of_mut!(ESTIMATE_IN_SECONDS));
+                //     }
+                //     unsafe {
+                //         ui.slider(hash!(), "milliseconds", 0.00f32..100.0f32,
+                //                   &mut *addr_of_mut!(ESTIMATE_MILLIS));
+                //     }
+                // }
                 unsafe {
                     ui.slider(hash!(), "max rays", 1.0f32..100_000.0f32,
                               &mut *addr_of_mut!(MAX_RAYS));
@@ -252,7 +250,7 @@ impl Laser {
     // }
     // 
     pub fn draw_rays_new(&mut self, other: &[Segment]) {
-        let lines = unsafe { self.solve_collisions(other) };
+        let lines = self.solve_collisions(other);
         draw_text(format!("Rays: {}", lines.len()).as_str(), 20.0, 20.0, 30.0, DARKGRAY);
 
         // let ray = self.ray;
@@ -584,9 +582,9 @@ impl NodeNetwork {
         }
         connections
     }
-    pub fn draw(&self) {
+    pub fn draw(&self, edge_thickness: f32) {
         for edge in &self.connections {
-            edge.draw(self.nodes[&edge.a].position, self.nodes[&edge.b].position);
+            edge.draw(self.nodes[&edge.a].position, self.nodes[&edge.b].position, edge_thickness);
         }
         for (_, node) in &self.nodes {
             node.draw(&self.texture);
@@ -824,23 +822,23 @@ pub fn refract(direction: Vec2, normal: Vec2, eta: f32) -> Option<Vec2> {
     Some(eta * direction - (eta * dot + k.sqrt()) * normal)
 }
 
-pub fn FresnelReflectAmount(n1: f32, n2: f32, normal: Vec2, incident: Vec2) -> f32
+pub fn fresnel_reflect_amount(n1: f32, n2: f32, normal: Vec2, incident: Vec2) -> f32
 {
     // Schlick aproximation
     let mut r0 = (n1 - n2) / (n1 + n2);
     r0 *= r0;
-    let mut cosX = normal.dot(incident);
+    let mut cos_x = normal.dot(incident);
     if n1 > n2
     {
         let n = n1 / n2;
-        let sin_t2 = n * n * (1.0 - cosX * cosX);
+        let sin_t2 = n * n * (1.0 - cos_x * cos_x);
         // Total internal reflection
         if sin_t2 > 1.0 {
             return 1.0;
         }
-        cosX = (1.0 - sin_t2).sqrt();
+        cos_x = (1.0 - sin_t2).sqrt();
     }
-    let x = 1.0 - cosX;
+    let x = 1.0 - cos_x;
     let mut ret = r0 + (1.0 - r0) * x * x * x * x * x;
 
     // adjust reflect multiplier for object reflectivity

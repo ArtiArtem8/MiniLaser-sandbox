@@ -18,6 +18,7 @@ pub struct Cell {
     sides: u8,
 }
 
+#[allow(dead_code)]
 impl Cell {
     const fn new() -> Self {
         Cell {

@@ -1,26 +1,23 @@
 // #![windows_subsystem = "windows"]
 
 use std::collections::HashMap;
-use std::mem::size_of_val;
-use std::time::Instant;
 
 use log::{debug, info};
 use macroquad::material::{gl_use_default_material, gl_use_material, MaterialParams};
 use macroquad::miniquad::window::screen_size;
 use macroquad::miniquad::{BlendFactor, BlendState, BlendValue, Equation, ShaderSource};
-use macroquad::prelude::scene::camera_pos;
 use macroquad::prelude::*;
-use macroquad::prelude::{draw_line, load_material, PipelineParams, BLUE, RED};
-use macroquad::time::get_time;
+use macroquad::prelude::{load_material, PipelineParams};
 use macroquad::ui::{root_ui, widgets};
-use macroquad::{color::{Color, DARKGRAY}, hash, input::is_key_pressed, input::KeyCode, math::Vec2, prelude::vec2, text::draw_text, time::get_frame_time, window::{
-    clear_background,
-    next_frame,
-    screen_height,
-    screen_width,
-    Conf,
-}};
-use ray_cast::{tuple2vec, vec2tuple, EdgeState, Laser, NodeNetwork, Segment};
+use macroquad::{color::{Color, DARKGRAY}, hash, input::is_key_pressed, input::KeyCode, math::Vec2,
+                prelude::vec2, text::draw_text, time::get_frame_time, window::{
+        clear_background,
+        next_frame,
+        screen_height,
+        screen_width,
+        Conf,
+    }};
+use ray_cast::{tuple2vec, vec2tuple, EdgeState, Laser, NodeNetwork};
 
 
 mod labyrinth;
@@ -103,9 +100,9 @@ async fn main() {
     let mut time_delta: f32;
     let mut show_ui: bool = false;
     let mut frame_time: f32 = 0.0;
-    let mut segments: Vec<Segment> = Vec::new();
+    // let mut segments: Vec<Segment>;
     let mut collisions: Vec<(Vec2, Vec2, Color)> = Vec::new();
-    
+
     let mut zoom: f32 = 1.0;
     let zoom_step: f32 = 0.001;
     let mut camera_target = vec2(screen_width() / 2.0, screen_height() / 2.0);
@@ -120,7 +117,7 @@ async fn main() {
         network.update(time_delta);
         unsafe { network.update_camera(camera_target, zoom); }
         if frame_time > 0.01667 && enable_collisions {
-            segments = network.get_all_connections();
+            let segments = network.get_all_connections();
             collisions = laser.solve_collisions(&segments);
             frame_time = 0.0;
         } else { frame_time += time_delta; }
@@ -133,7 +130,7 @@ async fn main() {
         gl_use_material(&light_material);
         laser.draw_rays_explicit(&collisions);
         gl_use_default_material();
-        network.draw();
+        network.draw(laser.thickness);
         laser.draw_laser_texture();
         set_default_camera();
         // laser.draw(&network.get_all_connections());
@@ -176,7 +173,7 @@ impl MiscUI {
         widgets::Window::new(hash!(), Vec2::new(400., 0.), Vec2::new(300., 300.))
             .label("Misc")
             .ui(&mut *root_ui(), |ui| {
-                ui.label(vec2(100.0, 0.0), "Labyrinth (pos in top left)");
+                ui.label(vec2(100.0, -5.0), "Labyrinth (pos in top left)");
                 ui.slider(hash!(), "lab x",
                           0.0f32..screen_width(), &mut self.lab_position.x);
                 ui.slider(hash!(), "lab y",
@@ -185,14 +182,14 @@ impl MiscUI {
                           0.0f32..screen_height(), &mut self.lab_size.x);
                 ui.slider(hash!(), "cell size", 0.0f32..100.0, &mut self.lab_cell_size);
                 self.lab_size = self.lab_size.round();
-                if ui.button(vec2(100.0, 110.0), "Build Labyrinth") {
+                if ui.button(vec2(100.0, 85.0), "Build Labyrinth") {
                     let size = (self.lab_size.x as usize, self.lab_size.x as usize);
                     let mut labyrinth = labyrinth::Labyrinth::new(self.lab_cell_size, size);
                     labyrinth.generate_depth_first();
                     lines_to_nodes(node_network, &labyrinth.get_as_lines(),
                                    tuple2vec(self.lab_position), self.edge_state);
                 };
-                ui.label(vec2(10.0, 130.0), "Circle (pos in center)");
+                ui.label(vec2(10.0, 105.0), "Circle (pos in center)");
                 for _ in 0..12 { ui.separator(); }
                 ui.slider(hash!(), "circle x", 0.0f32..screen_width(), &mut self.circle_position.x);
                 ui.slider(hash!(), "circle y", 0.0f32..screen_height(), &mut self.circle_position.y);
@@ -269,10 +266,11 @@ void main() {
 
 fn node_circle(node_network: &mut NodeNetwork, pos: Vec2, radius: f32, edge_state: EdgeState, sides: usize) {
     let mut key = 0;
+    let radius = radius as f64;
     for i in 0..sides {
-        let angle = i as f32 * 2.0 * std::f32::consts::PI / (sides as f32);
-        let pos = pos + Vec2::new(radius * angle.cos(), radius * angle.sin());
-        key = node_network.add_node(pos);
+        let angle = i as f64 * 2.0 * std::f64::consts::PI / (sides as f64);
+        let pos = pos + Vec2::new((radius * angle.cos()) as f32, (radius * angle.sin()) as f32);
+        key = node_network.add_node_with_radius(pos, (8.0 * 20.0 / sides as f32).clamp(1.0, 8.0));
         if i != 0 {
             node_network.add_connection(key, key - 1);
             if let Some(x) = node_network.connections.last_mut() {
@@ -280,7 +278,7 @@ fn node_circle(node_network: &mut NodeNetwork, pos: Vec2, radius: f32, edge_stat
             }
         }
     }
-    node_network.add_connection(key, key - 19);
+    node_network.add_connection(key, key - (sides - 1));
     if let Some(x) = node_network.connections.last_mut() {
         x.set_state(edge_state);
     }
