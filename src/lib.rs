@@ -5,17 +5,20 @@ use std::time::Instant;
 // #[cfg(not(target_family = "wasm"))]
 use log::{debug, error};
 use macroquad::color::{BLACK, BLUE, Color, DARKGRAY, hsl_to_rgb, RED, SKYBLUE, WHITE};
+use macroquad::experimental::scene::camera_pos;
 use macroquad::hash;
 use macroquad::input::{is_key_down, is_mouse_button_pressed, is_mouse_button_released,
-                       KeyCode, mouse_position, MouseButton};
-use macroquad::math::Vec2;
-use macroquad::prelude::{draw_text, ImageFormat};
+                       KeyCode, mouse_position as other_mouse_position, MouseButton};
+use macroquad::math::{DVec2, Vec2, vec2};
+use macroquad::prelude::{draw_text, glam, ImageFormat};
 use macroquad::shapes::{draw_circle, draw_line};
 use macroquad::texture::{draw_texture_ex,
                          DrawTextureParams,
                          Texture2D};
 use macroquad::ui::{root_ui, widgets};
 use macroquad::window::{screen_height, screen_width};
+
+mod labyrinth;
 
 // #[cfg(target_family = "wasm")]
 // use macroquad::logging::info;
@@ -28,8 +31,34 @@ use macroquad::window::{screen_height, screen_width};
 // use macroquad::logging::error;
 
 static mut ESTIMATE_IN_SECONDS: bool = false;
+static mut OBJECT_REFLECTIVITY: f32 = 1.0;
 static mut ESTIMATE_MILLIS: f32 = 1.0;
 static mut MAX_RAYS: f32 = 1000.0;
+static mut CAMERA_TARGET: Vec2 = vec2(0.0, 0.0);
+static mut ZOOM: f32 = 1.0;
+
+fn mouse_position() -> (f32, f32) {
+    unsafe {
+        screen_to_world(other_mouse_position())
+    }
+}
+
+unsafe fn screen_to_world(mouse_pos: (f32, f32)) -> (f32, f32) {
+    let (sx, sy) = mouse_pos;
+    let screen_center = vec2(screen_width() / 2.0, screen_height() / 2.0);
+    (
+        (sx - screen_center.x) / ZOOM + CAMERA_TARGET.x,
+        (sy - screen_center.y) / ZOOM + CAMERA_TARGET.y,
+    )
+}
+
+unsafe fn world_to_screen((x, y): (f32, f32)) -> (f32, f32) {
+    
+    let screen_center = vec2(screen_width() / 2.0, screen_height() / 2.0);
+    let (x, y) = (x - CAMERA_TARGET.x, y - CAMERA_TARGET.y);
+    (x * ZOOM + screen_center.x, y * ZOOM + screen_center.y)
+    
+}
 
 #[derive(Clone, Default, Debug)]
 pub struct Node {
@@ -75,6 +104,23 @@ impl Edge {
         Self { a, b, color: WHITE, thickness: 5.0, is_hovered: false, state: EdgeState::Reflective }
     }
 
+    pub const fn new_with_state(a: usize, b: usize, state: EdgeState) -> Self {
+        Self { a, b, color: WHITE, thickness: 5.0, is_hovered: false, state }
+    }
+
+    pub fn set_state(&mut self, state: EdgeState) {
+        debug!( "Setting state to {:?} from {:?}", state, self.state);
+        self.state = state
+    }
+
+    pub fn cycle_state(&mut self) {
+        self.set_state(match self.state {
+            EdgeState::Reflective => EdgeState::Absorptive,
+            EdgeState::Absorptive => EdgeState::Transparent,
+            EdgeState::Transparent => EdgeState::Reflective,
+        })
+    }
+
     fn draw(&self, start: Vec2, end: Vec2) {
         draw_line(start.x, start.y, end.x, end.y, self.thickness, self.color);
     }
@@ -91,13 +137,17 @@ impl Edge {
 }
 
 pub struct NodeNetwork {
-    nodes: HashMap<usize, Node>,
-    connections: Vec<Edge>,
+    pub nodes: HashMap<usize, Node>,
+    pub connections: Vec<Edge>,
     texture: Texture2D,
     dragged_node: Option<usize>,
     selected_node: Option<usize>,
     key: usize,
 }
+
+
+   
+
 
 #[derive(Clone, Copy, Debug)]
 pub struct Ray {
@@ -121,7 +171,7 @@ impl Laser {
         Self {
             position,
             direction,
-            ray: Ray { origin: position + direction * 35.0, direction, color: RED },
+            ray: Ray { origin: position + direction * 35.0, direction, color: Color::new(1.0, 0., 0., 1.) },
             thickness: 5.0,
             texture: Texture2D::from_file_with_format(
                 include_bytes!("../assets/laser.png"),
@@ -140,6 +190,7 @@ impl Laser {
                 ui.slider(hash!(), "pos y", 0.0f32..screen_height(), &mut self.position.y);
                 ui.slider(hash!(), "rotation", 0.0f32..360.0f32, &mut rotation);
                 ui.slider(hash!(), "thickness", 0.01f32..10.0f32, &mut self.thickness);
+                unsafe { ui.slider(hash!(), "OBJECT_REFLECTIVITY ", 0.00f32..1.0f32, &mut *addr_of_mut!(OBJECT_REFLECTIVITY)); }
 
                 // not allow in web
                 #[cfg(not(target_family = "wasm"))]
@@ -181,101 +232,127 @@ impl Laser {
             },
         );
     }
-
-    pub fn draw_rays(&mut self, other: &[Segment]) {
-        self.ray.origin = self.position + self.direction * 40.0;
-        let (points, _) = unsafe { self.collide_many(other) };
-        let mut prev_pos = self.position;
-        let mut t = 0.0;
-        let max_rays = unsafe { MAX_RAYS };
-        // draw_text(format!("{} {:?}", points.len(), points.iter().take(5).collect::<Vec<_>>()).as_str(), 20.0, 60.0, 30.0, DARKGRAY);
-        // debug!("{} {:?}", points.len(), points.iter().take(5).collect::<Vec<_>>());
-        for pos in points.iter() {
-            let color = hsl_to_rgb(t / max_rays, 1.0, 0.5);
-            // color.a = 1.0 - t/ 1000.0;
-            draw_line(prev_pos.x, prev_pos.y, pos.x, pos.y, self.thickness,
-                      color);
-            prev_pos = *pos;
-            t += 1.0;
-        }
-    }
-
+    // 
+    // pub fn draw_rays(&mut self, other: &[Segment]) {
+    //     self.ray.origin = self.position + self.direction * 40.0;
+    //     let (points, _) = unsafe { self.collide_many(other) };
+    //     let mut prev_pos = self.position;
+    //     let mut t = 0.0;
+    //     let max_rays = unsafe { MAX_RAYS };
+    //     // draw_text(format!("{} {:?}", points.len(), points.iter().take(5).collect::<Vec<_>>()).as_str(), 20.0, 60.0, 30.0, DARKGRAY);
+    //     // debug!("{} {:?}", points.len(), points.iter().take(5).collect::<Vec<_>>());
+    //     for pos in points.iter() {
+    //         let color = hsl_to_rgb(t / max_rays, 1.0, 0.5);
+    //         // color.a = 1.0 - t/ 1000.0;
+    //         draw_line(prev_pos.x, prev_pos.y, pos.x, pos.y, self.thickness,
+    //                   color);
+    //         prev_pos = *pos;
+    //         t += 1.0;
+    //     }
+    // }
+    // 
     pub fn draw_rays_new(&mut self, other: &[Segment]) {
-        // self.ray.origin = self.position + self.direction * 40.0;
         let lines = unsafe { self.solve_collisions(other) };
+        draw_text(format!("Rays: {}", lines.len()).as_str(), 20.0, 20.0, 30.0, DARKGRAY);
+
+        // let ray = self.ray;
+        // self.ray.origin += Vec2::Y * 2.0;
+        // lines.extend( unsafe { self.solve_collisions(other) } );
+        // self.ray.origin += Vec2::Y * -4.0;
+        // lines.extend( unsafe { self.solve_collisions(other) } );
+        // for i in -45..45 {
+        //      self.ray.direction = rotate(ray.direction, 2.0 * PI / 360.0 * i as f32);
+        //     lines.extend( unsafe { self.solve_collisions(other) } );
+        // }
+        // self.ray = ray;
         for line in lines.iter() {
-            draw_line(line.0.x, line.0.y, line.1.x,line.1.y, self.thickness,
+            draw_line(line.0.x, line.0.y, line.1.x, line.1.y, self.thickness,
                       line.2);
         }
     }
-
-
-    pub fn draw2(&mut self, other: &Vec<Segment>, time: f64) {
-        self.ray.origin = self.position + self.direction * 40.0;
-        let (points, _) = unsafe { self.collide_many(other) };
-        let mut prev_pos = self.position;
-        let mut t = 0.0;
-        let max_rays = unsafe { MAX_RAYS };
-        for pos in points.iter().take((time * 500. % 1000.) as usize) {
-            let mut color = hsl_to_rgb(t / max_rays, 1.0, 0.5);
-            color.a = 1.0 - t / 1000.0;
-            draw_line(prev_pos.x, prev_pos.y, pos.x, pos.y, self.thickness,
-                      color);
-            prev_pos = *pos;
-            t += 1.0;
+    pub fn draw_rays_explicit(&mut self, collisions: &[(Vec2, Vec2, Color)]) {
+        let lines = collisions;
+        draw_text(format!("Rays: {}", lines.len()).as_str(), 20.0, 20.0, 30.0, DARKGRAY);
+        for line in lines.iter() {
+            draw_line(line.0.x, line.0.y, line.1.x, line.1.y, self.thickness,
+                      line.2);
         }
-        // if points.len() < 1_000 {
-        //     // let end = prev_pos + direction * 10_000.0;
-        //     // draw_line(prev_pos.x, prev_pos.y, end.x, end.y, self.thickness, self.color);
-        // }
-        self.draw_laser_texture();
     }
-
-    pub unsafe fn collide_many(&self, other: &[Segment]) -> (Vec<Vec2>, Vec2) {
-        let mut collision_points: Vec<Vec2> = Vec::new();
-        let mut ray = self.ray;
-        let mut ray_origin_segment: Option<&Segment> = None;
-
-
-        // if ESTIMATE_IN_SECONDS {
-        //     let start = Instant::now();
-        //     let max_time = ESTIMATE_MILLIS as f64 / 1_000f64;
-        //     while start.elapsed().as_secs_f64() < max_time {
-        //         let (closest_point, ray_origin_new) = Self::find_closest_segment(ray, other, ray_origin_segment);
-        //         ray_origin_segment = ray_origin_new;
-        //         collision_points.push(closest_point.0);
-        //         if matches!(closest_point.2, EdgeState::Absorptive) { break; }
-        //         if closest_point.0.distance(ray.origin) > MAX_DISTANCE { break; }
-        //         ray = Ray {
-        //             origin: closest_point.0,
-        //             direction: closest_point.1,
-        //         };
-        //     }
-        // } else {
-        for _ in 0..MAX_RAYS as u32 {
-            let (closest_point, ray_origin_new) =
-                Self::find_closest_segment(ray, other, ray_origin_segment);
-            ray_origin_segment = ray_origin_new;
-            collision_points.push(closest_point.0);
-            if matches!(closest_point.2, EdgeState::Absorptive) { break; }
-            if closest_point.0.distance(ray.origin) > Self::MAX_DISTANCE { break; }
-            ray = Ray {
-                origin: closest_point.0,
-                direction: closest_point.1,
-                color: RED,
-            };
-        }
-        // }
-
-        (collision_points, self.ray.direction)
-    }
-    pub unsafe fn solve_collisions(&self, segments: &[Segment]) -> Vec<(Vec2, Vec2, Color)> {
+    // 
+    // 
+    // pub fn draw2(&mut self, other: &Vec<Segment>, time: f64) {
+    //     self.ray.origin = self.position + self.direction * 40.0;
+    //     let (points, _) = unsafe { self.collide_many(other) };
+    //     let mut prev_pos = self.position;
+    //     let mut t = 0.0;
+    //     let max_rays = unsafe { MAX_RAYS };
+    //     for pos in points.iter().take((time * 500. % 1000.) as usize) {
+    //         let mut color = hsl_to_rgb(t / max_rays, 1.0, 0.5);
+    //         color.a = 1.0 - t / 1000.0;
+    //         draw_line(prev_pos.x, prev_pos.y, pos.x, pos.y, self.thickness,
+    //                   color);
+    //         prev_pos = *pos;
+    //         t += 1.0;
+    //     }
+    //     // if points.len() < 1_000 {
+    //     //     // let end = prev_pos + direction * 10_000.0;
+    //     //     // draw_line(prev_pos.x, prev_pos.y, end.x, end.y, self.thickness, self.color);
+    //     // }
+    //     self.draw_laser_texture();
+    // }
+    // 
+    // pub unsafe fn collide_many(&self, other: &[Segment]) -> (Vec<Vec2>, Vec2) {
+    //     let mut collision_points: Vec<Vec2> = Vec::new();
+    //     let mut ray = self.ray;
+    //     let mut ray_origin_segment: Option<&Segment> = None;
+    // 
+    // 
+    //     // if ESTIMATE_IN_SECONDS {
+    //     //     let start = Instant::now();
+    //     //     let max_time = ESTIMATE_MILLIS as f64 / 1_000f64;
+    //     //     while start.elapsed().as_secs_f64() < max_time {
+    //     //         let (closest_point, ray_origin_new) = Self::find_closest_segment(ray, other, ray_origin_segment);
+    //     //         ray_origin_segment = ray_origin_new;
+    //     //         collision_points.push(closest_point.0);
+    //     //         if matches!(closest_point.2, EdgeState::Absorptive) { break; }
+    //     //         if closest_point.0.distance(ray.origin) > MAX_DISTANCE { break; }
+    //     //         ray = Ray {
+    //     //             origin: closest_point.0,
+    //     //             direction: closest_point.1,
+    //     //         };
+    //     //     }
+    //     // } else {
+    //     for _ in 0..MAX_RAYS as u32 {
+    //         let (closest_point, ray_origin_new) =
+    //             Self::find_closest_segment(ray, other, ray_origin_segment);
+    //         ray_origin_segment = ray_origin_new;
+    //         collision_points.push(closest_point.0);
+    //         if matches!(closest_point.2, EdgeState::Absorptive) { break; }
+    //         if closest_point.0.distance(ray.origin) > Self::MAX_DISTANCE { break; }
+    //         ray = Ray {
+    //             origin: closest_point.0,
+    //             direction: closest_point.1,
+    //             color: RED,
+    //         };
+    //     }
+    //     // }
+    // 
+    //     (collision_points, self.ray.direction)
+    // }
+    pub fn solve_collisions(&self, segments: &[Segment]) -> Vec<(Vec2, Vec2, Color)> {
         let ray = self.ray;
         let mut ray_stack: VecDeque<(Ray, Option<Segment>)> = [(ray, None)].into();
         let mut lines_stack: Vec<(Vec2, Vec2, Color)> = Vec::new();
         while let Some((ray, segment)) = ray_stack.pop_front() {
-            debug_assert!(ray.direction.is_normalized());
+            // if ray.color.a <= f32::EPSILON { continue; }
+            if ray.color.a <= 0.1f32 { continue; }
+            debug_assert!(ray.direction.is_normalized(),
+                          "ray not normal: {}, normal is {:?}, len is {:}",
+                          ray.direction, ray.direction.normalize(), ray.direction.length());
             if let Some((collision, segment)) = Self::find_closest_segment_new(ray, segments, segment.as_ref()) {
+                debug_assert!(collision.normal.is_normalized(),
+                              "not normal: {}, normal is {:?} {:?}",
+                              collision.normal, collision.normal.normalize(), collision);
                 match segment.2 {
                     EdgeState::Reflective => {
                         ray_stack.push_back((Ray {
@@ -285,26 +362,34 @@ impl Laser {
                         }, Some(*segment)));
                     }
                     EdgeState::Transparent => {
+                        let is_critical = collision.normal.dot(ray.direction).abs().acos() == 0.8509;
+                        let fresnel = ray.direction.dot(collision.normal).powi(6) * 0.97;
+                        // debug!("{}", FresnelReflectAmount(1.0, 1.33, collision.normal, ray.direction));
                         ray_stack.push_back((Ray {
                             origin: collision.position,
                             direction: reflect(ray.direction, collision.normal),
-                            color: ray.color, // TODO: use segment color
+                            color: {
+                                if is_critical {
+                                    ray.color
+                                } else { (ray.color.to_vec() * (1.0 - fresnel)).to_array().into() }
+                            }, // TODO: use segment color
                         }, Some(*segment)));
-                        if let Some(refract) = refract(ray.direction, collision.normal, 1.0 / 1.33) {
+                        if !is_critical {
+                            // debug!("refract {:}, arcsin {}", refract, (1.0f32 / 1.33f32).asin());
                             ray_stack.push_back((Ray {
                                 origin: collision.position,
                                 direction: ray.direction,
-                                color: ray.color, // TODO: use segment color
+                                color: (ray.color.to_vec() * fresnel).to_array().into(), // TODO: use segment color
                             }, Some(*segment)));
                         }
                     }
                     EdgeState::Absorptive => {}
                 }
                 lines_stack.push((ray.origin, collision.position, ray.color));
-            } else { 
+            } else {
                 lines_stack.push((ray.origin, ray.origin + ray.direction * Self::MAX_DISTANCE, ray.color));
             }
-            if lines_stack.len() > 1000 { break; }
+            if lines_stack.len() >= unsafe { MAX_RAYS as usize } { break; }
         }
         lines_stack
     }
@@ -337,48 +422,48 @@ impl Laser {
         } else { None }
     }
 
-    fn find_closest_segment<'a>(
-        ray: Ray,
-        other: &'a [Segment],
-        ray_origin_segment: Option<&'a Segment>,
-    ) -> (Segment, Option<&'a Segment>) {
-        let mut closest_point: Segment = Segment(
-            ray.origin + ray.direction * Self::MAX_DISTANCE,
-            ray.direction,
-            EdgeState::Reflective,
-        );
-        let mut ray_origin_new: Option<&Segment> = None;
-
-        for segment in other.iter() {
-            if let Some(origin_segment) = ray_origin_segment {
-                if segment == origin_segment { continue; }
-            }
-            match Self::collide(ray, (segment.0, segment.1)) {
-                Some((col_position, col_reflection)) => {
-                    // if closest_point.0.distance(ray.origin) > col_position.distance(ray.origin) {
-                    if closest_point.0.distance_squared(ray.origin) > col_position.distance_squared(ray.origin) {
-                        ray_origin_new = Some(segment);
-                        closest_point = Segment(col_position, col_reflection, segment.2);
-                    }
-                }
-                None => {}
-            }
-        }
-
-        (closest_point, ray_origin_new)
-    }
-    pub fn collide(ray: Ray, other: (Vec2, Vec2)) -> Option<(Vec2, Vec2)> {
-        if let Some((pos, normal)) = ray.collides_with(other) {
-            let reflection = ray.direction - (2.0 * normal.dot(ray.direction)) * normal;
-            // draw_line(pos.x, pos.y,
-            //           pos.x + reflection.x * 100.0,
-            //           pos.y + reflection.y * 100.0,
-            //           5.0, RED);
-            // draw_circle(pos.x, pos.y, 10.0, BLUE);
-            return Some((pos, reflection));
-        }
-        None
-    }
+    // fn find_closest_segment<'a>(
+    //     ray: Ray,
+    //     other: &'a [Segment],
+    //     ray_origin_segment: Option<&'a Segment>,
+    // ) -> (Segment, Option<&'a Segment>) {
+    //     let mut closest_point: Segment = Segment(
+    //         ray.origin + ray.direction * Self::MAX_DISTANCE,
+    //         ray.direction,
+    //         EdgeState::Reflective,
+    //     );
+    //     let mut ray_origin_new: Option<&Segment> = None;
+    // 
+    //     for segment in other.iter() {
+    //         if let Some(origin_segment) = ray_origin_segment {
+    //             if segment == origin_segment { continue; }
+    //         }
+    //         match Self::collide(ray, (segment.0, segment.1)) {
+    //             Some((col_position, col_reflection)) => {
+    //                 // if closest_point.0.distance(ray.origin) > col_position.distance(ray.origin) {
+    //                 if closest_point.0.distance_squared(ray.origin) > col_position.distance_squared(ray.origin) {
+    //                     ray_origin_new = Some(segment);
+    //                     closest_point = Segment(col_position, col_reflection, segment.2);
+    //                 }
+    //             }
+    //             None => {}
+    //         }
+    //     }
+    // 
+    //     (closest_point, ray_origin_new)
+    // }
+    // pub fn collide(ray: Ray, other: (Vec2, Vec2)) -> Option<(Vec2, Vec2)> {
+    //     if let Some((pos, normal)) = ray.collides_with(other) {
+    //         let reflection = ray.direction - (2.0 * normal.dot(ray.direction)) * normal;
+    //         // draw_line(pos.x, pos.y,
+    //         //           pos.x + reflection.x * 100.0,
+    //         //           pos.y + reflection.y * 100.0,
+    //         //           5.0, RED);
+    //         // draw_circle(pos.x, pos.y, 10.0, BLUE);
+    //         return Some((pos, reflection));
+    //     }
+    //     None
+    // }
     pub fn look_at(&mut self, position: Vec2) {
         self.direction = position - self.position;
         self.ray.direction = self.direction.normalize_or_zero();
@@ -402,19 +487,19 @@ impl Ray {
         let t1 = line_segment.perp_dot(start_to_origin) / denominator;
         let t2 = start_to_origin.dot(ray_dir_perp) / denominator;
 
-        return if t1 >= 0.0 && t2 >= 0.0 && t2 <= 1.0 {
+        if t1 >= 0.0 && t2 >= 0.0 && t2 <= 1.0 {
             let collision = self.origin + ray_dir * t1;
-            let normal_to_collision = (collision - start).normalize_or_zero().perp();
-            // if normal_to_collision.dot(ray_dir) > 0.0 {
-            //     debug!("Reflecting normal");
-            //     normal_to_collision = -normal_to_collision;
-            // }
+            let normal_to_collision: Vec2 = if (collision - start).length_squared() <= f32::EPSILON {
+                (collision - end).normalize().perp()
+            } else {
+                (collision - start).normalize().perp()
+            };
             // draw_line(collision.x, collision.y, (collision.x + normal_to_collision.x * 100.0),
             // (collision.y + normal_to_collision.y * 100.0), 5.0, WHITE);
             Some((collision, normal_to_collision))
         } else {
             None
-        };
+        }
     }
 }
 
@@ -431,6 +516,17 @@ impl NodeNetwork {
             selected_node: None,
             key: 0,
         }
+    }
+    pub fn clean(&mut self) {
+        self.nodes.clear();
+        self.connections.clear();
+        self.dragged_node = None;
+        self.selected_node = None;
+        self.key = 0;
+    }
+    pub unsafe fn update_camera(&mut self, camera_target: Vec2, zoom: f32) {
+        CAMERA_TARGET = camera_target;
+        ZOOM = zoom;
     }
     pub fn update(&mut self, _delta: f32) {
         self.handle_mouse();
@@ -475,11 +571,7 @@ impl NodeNetwork {
 
             if edge.is_hovered && !is_some_hovered_node &&
                 is_mouse_button_pressed(MouseButton::Left) {
-                edge.state = match edge.state {
-                    EdgeState::Reflective => EdgeState::Transparent,
-                    EdgeState::Transparent => EdgeState::Absorptive,
-                    EdgeState::Absorptive => EdgeState::Reflective,
-                }
+                edge.cycle_state();
             }
         }
     }
@@ -502,11 +594,12 @@ impl NodeNetwork {
     }
     fn handle_selection(&mut self) {
         if self.selected_node.is_none() { return; }
-        let mp = vec2tuple(mouse_position());
+        let mp = vec2tuple(other_mouse_position());
         let node = &self.nodes[&self.selected_node.unwrap()];
         let mut new_mp = node.position;
         new_mp = Self::ctrl_shift(mp, node, &mut new_mp);
-        draw_line(new_mp.x, new_mp.y, node.position.x, node.position.y, 5.0, WHITE);
+        let (node_x, node_y) = unsafe { world_to_screen((node.position.x, node.position.y)) };
+        draw_line(new_mp.x, new_mp.y, node_x, node_y, 5.0, WHITE);
     }
     fn handle_mouse(&mut self) {
         if is_mouse_button_pressed(MouseButton::Right) && self.dragged_node.is_none() {
@@ -598,8 +691,17 @@ impl NodeNetwork {
         debug!("Added node at {:} keys: {}", position, self.key);
         self.nodes.insert(self.key, Node::new_default_radius(position));
         self.key += 1;
-        return self.key - 1;
+        self.key - 1
     }
+
+    pub fn add_node_with_radius(&mut self, position: Vec2, radius: f32) -> usize {
+        debug!("Added node at {:} keys: {} with radius {}", position, self.key, radius);
+        self.nodes.insert(self.key, Node::new(position, radius));
+        self.key += 1;
+        self.key - 1
+    }
+
+
     pub fn add_connection(&mut self, prev_conn: usize, cur_conn: usize) {
         if self.connections.iter().any(|edge|
         (edge.a == prev_conn && edge.b == cur_conn) ||
@@ -667,16 +769,6 @@ impl Node {
     }
 }
 
-impl PartialEq for Node {
-    fn eq(&self, other: &Self) -> bool {
-        self == other
-    }
-
-    fn ne(&self, other: &Self) -> bool {
-        self != other
-    }
-}
-
 
 #[inline(always)]
 #[must_use]
@@ -708,9 +800,21 @@ fn lerp_color_in_place(from: &mut Color, to: Color, t: f32) {
 pub const fn vec2tuple((x, y): (f32, f32)) -> Vec2 {
     Vec2::new(x, y)
 }
+#[inline(always)]
+pub const fn tuple2vec(vec: Vec2) -> (f32, f32) {
+    (vec.x, vec.y)
+}
+
+pub fn rotate(direction: Vec2, angle: f32) -> Vec2 {
+    let cos = angle.cos();
+    let sin = angle.sin();
+    Vec2::new(direction.x * cos - direction.y * sin, direction.x * sin + direction.y * cos)
+}
 
 pub fn reflect(direction: Vec2, normal: Vec2) -> Vec2 {
-    direction - (2.0 * direction.dot(normal)) * normal
+    let res = direction - (2.0 * normal * direction.dot(normal));
+    debug_assert!(res.is_normalized(), "res direction not normal: {}, normal is {:?}", res, res.normalize());
+    res.normalize()
 }
 
 pub fn refract(direction: Vec2, normal: Vec2, eta: f32) -> Option<Vec2> {
@@ -718,6 +822,30 @@ pub fn refract(direction: Vec2, normal: Vec2, eta: f32) -> Option<Vec2> {
     let k = 1.0 - eta.powi(2) * (1.0 - dot.powi(2));
     if k < 0.0 { return None; }
     Some(eta * direction - (eta * dot + k.sqrt()) * normal)
+}
+
+pub fn FresnelReflectAmount(n1: f32, n2: f32, normal: Vec2, incident: Vec2) -> f32
+{
+    // Schlick aproximation
+    let mut r0 = (n1 - n2) / (n1 + n2);
+    r0 *= r0;
+    let mut cosX = normal.dot(incident);
+    if n1 > n2
+    {
+        let n = n1 / n2;
+        let sin_t2 = n * n * (1.0 - cosX * cosX);
+        // Total internal reflection
+        if sin_t2 > 1.0 {
+            return 1.0;
+        }
+        cosX = (1.0 - sin_t2).sqrt();
+    }
+    let x = 1.0 - cosX;
+    let mut ret = r0 + (1.0 - r0) * x * x * x * x * x;
+
+    // adjust reflect multiplier for object reflectivity
+    unsafe { ret = OBJECT_REFLECTIVITY + (1.0 - OBJECT_REFLECTIVITY) * ret; }
+    return ret;
 }
 
 fn point_to_line_distance(point: Vec2, line_start: Vec2, line_end: Vec2) -> f32 {
